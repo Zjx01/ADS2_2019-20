@@ -1,0 +1,366 @@
+---
+title: " COVID-19 Pandemic Data Analysis Report"
+author: "Group E"
+date: "5/10/2020"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(deSolve)
+data = read.csv("./COVID19_full_data.csv")
+# Extended data used for report
+extended_data = read.csv("./COVID19_full_data_extended.csv")
+# resource:  https://ourworldindata.org/coronavirus, updated data until 7 May is essential for the analysis.
+pop = read.csv("./CountryPopulation.csv") 
+# resource: https://worldpopulationreview.com/countries/
+
+# Settings
+COUNTRY_INTEREST_CUTOFF = 1000 # set total cases threhold on 2020-03-17 for filtering countries to be analysed in Part 2, 1000 by default.
+LOCKDOWN_DATE = c("Austria"="2020-03-16","Belgium"="2020-03-18","China"="2020-01-23",
+                  "France"="2020-03-17","Germany"=NULL,"Iran"=NULL,"Italy"="2020-03-10",
+                  "Netherlands"=NULL,"Norway"=NULL,"South Korea"="2020-03-03",
+                  "Spain"="2020-03-14","Sweden"=NULL,"Switzerland"="2020-03-16",
+                  "United Kingdom"="2020-03-23","United States"="2020-03-13")
+# summarized from online resource: https://www.thepaper.cn/newsDetail_forward_6679293
+# change lockdown date according to the country of interest.
+```
+
+
+# Part 1: Extent of the pandemic
+
+- Plot of total cases number over time for each of the 15 countries with more than 1000 cases on 17 March.
+```{r}
+data$location = as.character(data$location) # format transfer for computing
+data$date = as.Date(data$date)
+countryOverOneThousand = data$location[which(data$date=="2020-03-17" 
+                                             & data$total_cases>1000 
+                                             & data$location!="World")]
+
+ggplot(data = data[which(data$location %in% countryOverOneThousand),],
+       aes(color=location)) +
+  geom_line(aes(x=date, y=total_cases)) + theme_classic() + labs(title="Total COVID-19 cases")
+```
+
+
+- For the last 2 weeks (4 March to 17 March), look at the total number of deaths and the total number of cases worldwide. Provide an estimate of the death rate (total deaths divided by total cases), including a confindence interval, for each day in those two weeks. Plot that data.  
+```{r cache=TRUE}
+worldData = data[data$location=="World",]
+worldData = worldData[(nrow(worldData)-13):nrow(worldData),]
+worldData = cbind(worldData, "death_rate"=worldData$total_deaths/worldData$total_cases)
+
+# Calculating confidence using bootstrapping
+cdUpper = c()
+cdLower = c()
+set.seed(1000)
+for (i in 1:dim(worldData)[1]){
+  sampled_death_rate_coll = c()
+  for (j in 1:200){ # bootstrap 200 times
+    pool = c(rep(0,worldData$total_cases[i]-worldData$total_deaths[i]),
+             rep(1,worldData$total_deaths[i])) 
+    sampled_pool = sample(pool, length(pool), replace = T)
+    sampled_death_rate = sum(sampled_pool) / length(sampled_pool)
+    sampled_death_rate_coll = c(sampled_death_rate_coll, sampled_death_rate)
+  }
+  qt = quantile(sampled_death_rate_coll, probs = c(0.025, 0.975), names = F)
+  cdLower = c(cdLower, qt[1])
+  cdUpper = c(cdUpper, qt[2])
+}
+worldData = cbind(worldData, "cdLower" = cdLower)
+worldData = cbind(worldData, "cdUpper" = cdUpper)
+
+# Plotting
+ggplot(data=worldData, aes(x=date, y=death_rate, ymin=cdLower, ymax=cdUpper)) +
+  geom_errorbar(width=0.5) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Death rate worldwide with 95% CI", y = "Death rate") + theme_light()
+```
+
+
+- Italy has been the first country in Europe to see a major outbreak of COVID-19. In the UK, media have reported that the UK is around 14 days “behind” Italy. This can be validated by the **overlap of total case number** in United Kingdom and Italy if the former one is shifted 14 days earlier.
+```{r warning=FALSE}
+ItyAndUk = subset(data, data$location %in% c("Italy", "United Kingdom"))
+DayMinus14 = ItyAndUk[which(ItyAndUk$location=="United Kingdom"),]
+DayMinus14$date = DayMinus14$date-14 # shift the data
+DayMinus14$location = "United Kingdom (shifted 14 days earlier)"
+ItyAndUk = rbind(ItyAndUk, DayMinus14)
+ggplot(data = ItyAndUk) +
+  geom_line(aes(x=date, y=total_cases, color=location)) +
+  xlim(as.Date("2020-01-31"), as.Date("2020-03-17")) +
+  theme_classic() + labs(title="Comparsion between total cases in UK and Italy")
+```
+  
+
+# Part 2: Ask your own question
+
+## Raised question
+
+As concerned by both decision makers and the general public during COVID-19 pandemic, we wish to detect the **effects of travel restirction policies on the increasing total case numbers**.
+
+## Method
+
+In order to detect the quick response of travel restriction policies, we focus on the exponential growth stage of total case numbers. Earlier or later **transition of the curve representing total case numbers from exponential growth to a more stable plateau** may reflect the contribution of travel restriction policies. The transition can be characterized by the uncoupling between an exponential model and the real data. On the other hand, since data points are unstable or influenced by underreporting at the beginning of epidemic, goodness of fit between an exponential model and the real data is likely to increase. 
+
+Since an exponential model \(y = Ce^{\lambda t}\) can be generated from parameters obtained by linear regression on ln-transformed data \(\ln y = \ln C + \lambda t\). We used **the peak of \(R^2\)** from this linear regression to estimate the beginning of transition from exponential growth to the plateau (referred as "turn point" in the rest of the report). We hypothesized as:
+
+  H0: **Date when travel restriction policies are implemented has no correlation with the date of the \(R^2\)  peak between an estimated exponential model and the real data.**
+  
+  H1: **Date when travel restriction policies are implemented correlates with the date of the \(R^2\)  peak between an estimated exponential model and the real data.**
+
+### An illustration by simulation
+
+This method is theoretically applicable  as illustrated by the following SEIR simulation. In the simulation, travel restriction policy is reported as reduced effective contact possibility \(\beta\).
+```{r, warning=FALSE}
+SEIR<-function(time, state, pars){ with(as.list(c(state, pars)),{ 
+    dS <- - (S * beta * E + S * delta * I)/N # S: susceptible
+    dE <- (S * beta * E)/N - E * delta # E: exposed
+    dI <- E * delta - I * (mu + gamma)  # I: infected
+    dR <- I * gamma # R: recovered
+    dD <- I * mu
+    dI_total <- E * delta
+    dN <- dS + dE + dI + dR 
+    list(c(dS,dE,dI,dR,dN,dI_total,dD))}) }
+# beta: probability of infection; delta:probability of of exposed people to become infected 
+# gamma: recover rate mu:death rate.
+init<-c(S = 9999900, E =100 , I = 0, R = 0, N = 10000000, I_total = 0, D = 0)	
+time <- seq(1,150, 1)
+pars = c(beta = 0.5,delta = 0.4,gamma = 0.1,mu=0.034)
+pars_high_restriction = c( beta = 0.49,	delta = 0.4,gamma = 0.1,	mu=0.034)
+pars_low_restriction = c( beta = 0.51,	delta = 0.4,gamma = 0.1,	mu=0.034)
+SEIR.control = lsoda(y = init, times = time, func = SEIR, parms = pars)[-1,7]
+SEIR.high = lsoda(y = init, times = time, func = SEIR, parms = pars_high_restriction)[-1,7]
+SEIR.low = lsoda(y = init, times = time, func = SEIR, parms = pars_low_restriction)[-1,7]
+simulation = data.frame(
+  "Restriction"=c(rep("beta=0.5",149),rep("beta=0.49",149),rep("beta=0.51",149)),
+  "Total_cases"=c(SEIR.control,SEIR.high,SEIR.low),"day"=rep(1:149,3))
+ggplot(simulation) + geom_line(aes(x=day,y=Total_cases,color=Restriction)) + theme_classic() +
+    labs(x="Day after outbreak",y="Total cases",title = "SEIR simulation")
+```
+
+Note the simulated transition happens at the window from day 50 to day 100. We next define a function named **R_change** to output the change of \(R^2\) with **increasing days accounted for regression** in each condition during the epidemic.
+
+The correlation between fitted values and residuals is also recorded in the function, therefore the **equality of variance** assumption for linear regression is verifiable.
+```{r}
+# Determine R curve
+simulation$Total_cases = logb(simulation$Total_cases) # ln transfer
+R_change = function(x, from_day){
+  # dataframe format: category | value(ln transformed) | day
+  res_cd = c()
+  res_day = c()
+  res_lambda = c() # fitted lambda
+  res_C = c() # fitted C
+  res_R = c() # goodness of fit
+  res_spread_cor = c() # assumption: equality of variance
+  for (cd in levels(x[,1])){
+     d = subset(x, x[,1]==cd)
+     for (j in from_day:max(d[,3])){
+       # do regression from certain days to the last, inspect change of R^2.
+       model = lm(d[1:j,2]~d[1:j,3]) # first day in simulation is 0
+       res_spread_cor = c(res_spread_cor,cor(fitted(model),residuals(model)))
+       res_cd = c(res_cd, cd)
+       lambda = model$coefficients[2]
+       C = exp(model$coefficients[1]) # transfer back from ln
+       res_lambda = c(res_lambda, lambda)
+       res_C = c(res_C, C)
+       res_R = c(res_R, summary(model)$r.square)
+       res_day = c(res_day, j) } }
+  res = data.frame("Category"=res_cd, "lambda"=res_lambda,
+                   "C"=res_C,"R_square"=res_R,
+                   "day"=res_day, "variance"=res_spread_cor)
+  colnames(res)[1] = names(x)[1] # asign column names according to the original data
+  colnames(res)[5] = names(x)[3]
+  return(res)
+}
+res = R_change(simulation,8)
+ggplot(res,aes(x=day, y=R_square, color=Restriction)) +
+  geom_line() + theme_classic() +
+    labs(x="Day after outbreak used for regression",y="R square",title = "Change of R square")
+```
+
+Surprisingly, \(R^2\) concaves at the early stage of the epidemic. We decided to remove the initial highest \(R^2\) and focus on the peak after the concave in further analysis.
+
+As for the peak around 60~100 days after outbreak, Higher \(\beta\) due to less restricted measures manifests delayed turn point (red line).
+
+### Steps of analysis:
+
+1. Normalize and align data to make them comparable among different countries.
+2. Determine the curve of \(R^2\) between linear model and data in each country.
+3. Determine the correlation between restriction policies and the peak of \(R^2\).
+4. Discuss possible factors influencing the result.
+
+\(P < 0.05\) is considered as statistical significant is this report.
+
+We used extended dataset of COVID-19 case updated till 7 May from the same online resource (https://ourworldindata.org/coronavirus). We were most interested in countries that have reported more than `r COUNTRY_INTEREST_CUTOFF` cases on 17 March.
+```{r}
+extended_data$location = as.character(extended_data$location)
+extended_data$date = as.Date(extended_data$date)
+# Country of interest
+country = 
+  extended_data$location[
+    which(extended_data$date=="2020-03-17" &
+            extended_data$total_cases>COUNTRY_INTEREST_CUTOFF
+          &extended_data$location!="World")]
+```
+
+
+## 1. Normalize and Align the data
+
+We first normalize data in each country of interest with population data from https://worldpopulationreview.com/countries/ to make them comparable. To determine the first day of outbreak, we search for the first five consecutive days with increasing cases. Therefore, we will rule out the first few cases which are more likely to be imported cases rather than local transmission. The first day of this 5-day interval is considered as the first day of epidemic outbreak in a given country.
+```{r, cache=TRUE}
+# Normalization with population data
+population = pop$pop2020
+names(population) = pop$name
+extended_data = subset(extended_data, extended_data$location %in% country)
+population_col = c() # check population of each country
+for (i in 1:dim(extended_data)[1]){
+  population_col = c(population_col,population[extended_data[i,"location"]])
+}
+extended_data = cbind(extended_data, "population (10^3)"=population_col)
+normalized_extended_data = extended_data
+for (i in 3:6){ # normalize all data in columns
+  normalized_extended_data[,i] = as.numeric(
+    as.character(normalized_extended_data[,i]))/(as.numeric(
+      as.character(normalized_extended_data[,7]))*1000)
+}
+# Align date coordination (five consecutive increasing days)
+aligned_extended_data = data.frame()
+for (ct in country){
+  d = subset(normalized_extended_data, normalized_extended_data$location==ct)
+  for (i in 2:(dim(d)[1]-5)){
+    if (d[i,"total_cases"]>0 & prod(diff(c(d[i:(i+5),"total_cases"])))!=0){ 
+      # search for 5 days increasing in a row, record the rest.
+      d_s = subset(d, d$date>=d[i,"date"])
+      # outbreak period must be longer than 10 for further analysis.
+      if (dim(d_s)[1]<10) { break } else {
+        d_s = cbind(d_s, "DayOfOutbreak" = 1:dim(d_s)[1])
+        aligned_extended_data = rbind(aligned_extended_data, d_s)
+        break}}}}
+# Visualization
+ggplot(data = aligned_extended_data, aes(x=DayOfOutbreak, y=total_cases)) +
+  geom_line(aes(color = location)) +
+  geom_point(aes(color = location), size=0.03, color = "black") + theme_classic() +
+  labs(x="Day after outbreak",y="Total cases",title = "Aligned curve of cases")
+```
+
+**Germany is an outlier** on the plot. Let's check the raw data one month before or after the aligned outbreak date Jan 30.
+```{r}
+par(pin = c(4,2))
+plot(extended_data[extended_data$location=="Germany"&
+                     extended_data$date<"2020-03-04",c("date","total_cases")],
+     main="Germany total cases at early stage",type="b", ylab="Total cases")
+```
+
+Now that data from Germany manifests a plateau around Feb 12 to Feb 26 with total infected cases below 20, we set the first day of outbreak in Germany to be Feb 27.
+```{r}
+aligned_extended_data = aligned_extended_data[-which(aligned_extended_data$location=="Germany"&
+                                                       aligned_extended_data$date<"2020-02-27"),]
+aligned_extended_data$DayOfOutbreak[
+  aligned_extended_data$location=="Germany"] = 1:dim(  # reassign outbreak days
+    aligned_extended_data[aligned_extended_data$location=="Germany",])[1]
+ggplot(data = aligned_extended_data, aes(x=DayOfOutbreak, y=total_cases)) +
+  geom_line(aes(color = location)) +
+  geom_point(aes(color = location), size=0.03, color = "black") + theme_classic() +
+  labs(x="Day after outbreak",y="Total cases",title = "Aligned curve of cases")
+```
+
+## 2. Determine the curve of \(R^2\) between linear model and data in each country.
+
+As defined in the _method_ section, an exponential-plateau transition point is the day when "fraction of variance explained by the model" i.e. \(R^2\) begins to decrease if the next day is accounted for the linear regression.
+
+```{r, warning=FALSE}
+# ln transfer
+trans_align_norm_extended_data = data.frame("location"=aligned_extended_data$location, 
+                              "ln_total_cases" = logb(aligned_extended_data$total_cases), 
+                              "DayOfOutbreak"=aligned_extended_data$DayOfOutbreak)
+res_extended_data = R_change(trans_align_norm_extended_data,8)
+ggplot(res_extended_data,aes(x=DayOfOutbreak, y=R_square, color=location)) +
+  geom_line() +
+  geom_point(size=0.03,color="black") +
+  theme_classic() +
+  labs(x="Day after outbreak used for regression",y="R square",title = "Change of R square")
+```
+
+### Check equality of variance assumption for linear regression
+```{r}
+par(pin = c(4,2))
+hist(abs(res_extended_data$variance)
+     ,main="Correlation of fitted value and residual"
+     ,xlab = "correlation in each linear regression")
+```
+
+The very low correlation between fitted value and the model residuals verifies equality of variance assumption for each linear regression.
+
+## 3. Determine the correlation between restriction policies and the peak of \(R^2\)
+
+To determine the first peak after the concave/decreasing interval, we calculated difference between \(R_i^2\) in each country. We then spliced out the increasing intervals of \(R_i^2\).
+
+For each country of interest, we checked the date when the country government announced an national emergency situation (summarized from a Chinese state-hold news source). Most countries implemented national wide travel restriction policies right after such announcement.
+```{r, warning=FALSE}
+max_R = c()
+max_day = c()
+lockdown_date = c()
+country = levels(res_extended_data$location)
+for (ct in country){
+  # extract increasing intervals and the corresponding maximum R square
+  difference = diff(res_extended_data[res_extended_data$location==ct, "R_square"])
+  R = res_extended_data[res_extended_data$location==ct, "R_square"]
+  mr = max(R[which(difference>=0)])
+  max_R = c(max_R, mr)
+  max_day = c(max_day, res_extended_data[which(res_extended_data$R_square==mr), "DayOfOutbreak"])
+  if (is.na(LOCKDOWN_DATE[ct])){ 
+    # map country name to summarized announcement of national emergency
+    lockdown_date = c(lockdown_date, NA) # if no summarized extended_data, asign NA
+  } else {
+    lockdown_date = c(lockdown_date, 
+                    aligned_extended_data[aligned_extended_data$location==ct
+                    & aligned_extended_data$date==as.Date(LOCKDOWN_DATE[ct]),"DayOfOutbreak"])}
+}
+turn_points = data.frame("location"=country,"DayOfOutbreak"=max_day,
+                         "R.square"=max_R,"lockdown_date"=as.numeric(lockdown_date))
+turn_points$location = as.character(turn_points$location)
+# sort table according to turn point
+turn_points = turn_points[order(turn_points[,"DayOfOutbreak"]),1:4]
+turn_points$location = factor(turn_points$location,levels=turn_points$location)
+# visualize
+ggplot(turn_points) + 
+  geom_point(aes(x=location,y=DayOfOutbreak,color="Peak of R squared")) +
+  geom_point(aes(x=location,y=lockdown_date,color="Anouncement of national emergency")) +
+  theme_light() +
+  theme(axis.text.x=element_text(angle=45, hjust = 1)) +
+  labs(y="Days after outbreak")
+```
+
+Although turn points for some countries in the diagram lays before the announcement of national emergency, they are included in the analysis since national emergency is an arbitrary centralized point of travel restriction policies. It is possible that local policies are implemented before nationwide actions.
+
+We performed a Pearson's correlation test on these data to address our hypothesis.
+
+Normality assumption.
+```{r}
+# remove NAs before testing
+turn_points = turn_points[!is.na(turn_points$lockdown_date),]
+# Kolmogorov-Smirnov Test for data normality 
+ks.test(turn_points$DayOfOutbreak,"pnorm")
+```
+
+```{r}
+cor.test(turn_points$DayOfOutbreak,turn_points$lockdown_date)
+```
+
+Since P value is higher than 0.05 cut-off, we **failed to reject H0**, i.e. Date when travel restriction policies are implemented has no correlation with the date of the \(R^2\) peak between an estimated exponential model and the real data
+
+## 4. Discussion
+
+The alternative hypothesis we raised is that **lockdown policy and epidemic prevention policy has an effect on R square peak**. We failed to detect such an effect based on analysis above.
+
+There are several factors that may influence the result. 
+
+1. The lockdown policy and epidemic prevention policy are implemented earlier than the date of Announcement of national emergency. The earlier implemented policies mean earlier control of the coronavirus and lead to the earlier R square peak than we expected.
+
+2. The data of reported cases are different from the data of real cases influence the result. According to our hypothesis the R square peak should be calculated according to the change of real infected cases. However, we can only use the reported data to represent the real infected cases. The difference between regional and cultural characteristics would also influence the lockdown policy. As what we have done in this hypothesis, we could only use idealized models, which means we could not perfectly fit all the policies by every country. For example, in some countries the restriction is not so strict as other countries and the executive ability of citizens are not quite similar. Thus, the R square peak could be not strictly consistent with real cases.
+
+3. The reported data is influenced not only by the lockdown policy and epidemic prevention policy but also by other factors such as the ability of coronavirus testing. Besides policies, the lack of coronavirus testing equipment could be the main reason that cause the reduction of reported cases and cause the earlier R square peak. Also, at the early stage, the standards of identifying coronavirus are ambiguous, adding false negative possibility of the diagnosis therefore influencing the result as well.
